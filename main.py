@@ -10,16 +10,22 @@ r_hat(h), and the spread s(h) is their weighted standard deviation.
 
 Weights favour the launches most like this one: a Gaussian kernel on
 |ln(a_c) - ln(p)| (p is the case's hour-1 print), times a boost for
-launches that, like this case's game, unlocked at rolling local midnight
-(their surge pattern through the UTC day is the same archetype; launches
-with a single global unlock or long early access peak in hour 1 and stay
-flat, which smears the ensemble's shape if they dominate).
+launches whose unlock archetype matches this case's game — rolling local
+midnight vs a single global unlock time. The two archetypes have opposite
+day shapes (a rolling-midnight launch surges through the UTC day as the US
+unlocks and prime time arrive; a global-unlock launch peaks in hour 1 and
+decays), so letting the wrong archetype dominate smears the ensemble's
+shape whichever kind of launch is being forecast.
 
 The median forecast is q50(h) = p * exp(r_hat(h)), with positive r_hat
-(growth hours) scaled by GROWTH_LIFT: the ensemble centre still
-understates how hard a rolling-midnight launch surges once the US unlocks
-and prime time arrive. The five quantiles are
-q_tau(h) = q50(h) * exp(z_tau * s(h)) with s floored and capped.
+(growth hours) scaled by GROWTH_LIFT when the case is a rolling-midnight
+launch: the ensemble centre still understates how hard such a launch
+surges. For a global-unlock case there is no surge to lift — hour 1
+already holds the peak — so the centre is used as-is. The five quantiles
+are q_tau(h) = q50(h) * exp(z_tau * s(h)) with s floored and capped, then
+tapered by SPREAD_HOUR_SLOPE across the day: launch curves converge as
+the day wears on (every title settles toward its late-day level), so the
+ensemble's dispersion overstates the uncertainty at late hours.
 
 A comparable whose name is the case game's own name (or begins with it)
 is left out: in the final, the Grand Theft Auto VI category's own
@@ -48,13 +54,14 @@ OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 Z = [-1.644854, -0.674490, 0.0, 0.674490, 1.644854]
 
-# --- model constants (tuned on the four practice cases) ---
+# --- model constants (tuned on the practice cases + leave-one-out over the pool) ---
 BANDWIDTH = 0.5         # Gaussian kernel width on |ln(a_c) - ln(p)|
-UNLOCK_BOOST = 2.5      # weight multiplier for rolling-midnight comparables (case is one too)
-GROWTH_LIFT = 1.4       # multiplier on positive r_hat (growth hours); dips are used as-is
+UNLOCK_BOOST = 2.5      # weight multiplier for comparables whose unlock archetype matches the case's
+GROWTH_LIFT = 1.4       # multiplier on positive r_hat (growth hours), rolling-midnight cases only
 SPREAD_MULT = 0.85      # global multiplier on the per-hour weighted dispersion
 SPREAD_FLOOR = 0.10     # smallest log-spread at any hour
 SPREAD_CAP = 0.85       # largest log-spread at any hour
+SPREAD_HOUR_SLOPE = -0.3  # spread taper across hours 2..24: x(1 + slope * (hour-2)/22)
 TRIM = 0.2              # weight trimmed from each tail of the per-hour ratio distribution
 MIN_DAY_POINTS = 10     # a comparable needs at least this many known release-day hours
 
@@ -146,7 +153,8 @@ def comparable_curves(case: dict, p: float) -> list[tuple[float, list[float]]]:
         anchor = curve[0]
         log_anchor = math.log(anchor)
         w = math.exp(-0.5 * ((log_anchor - log_p) / BANDWIDTH) ** 2)
-        if case_rolling and "midnight" in (comp.get("unlock") or "").lower():
+        comp_rolling = "midnight" in (comp.get("unlock") or "").lower()
+        if comp_rolling == case_rolling:
             w *= UNLOCK_BOOST
         ratios = [math.log(curve[i]) - log_anchor for i in range(1, 24)]
         out.append((w, ratios))
@@ -158,6 +166,7 @@ def ensemble(case: dict, p: float) -> tuple[list[float], list[float]]:
     curves = comparable_curves(case, p)
     if not curves:
         return [0.0] * 23, [0.15 * math.sqrt(h - 1) for h in range(2, 25)]
+    case_rolling = "midnight" in (case.get("notes") or "").lower()
     r_hat = []
     spread = []
     for j in range(23):
@@ -166,10 +175,12 @@ def ensemble(case: dict, p: float) -> tuple[list[float], list[float]]:
         wsum = sum(w for _, w in pairs)
         var = sum(w * (r - centre) ** 2 for r, w in pairs) / wsum
         s = SPREAD_MULT * math.sqrt(var)
-        if centre > 0:
+        if case_rolling and centre > 0:
             centre *= GROWTH_LIFT
+        s = min(SPREAD_CAP, max(SPREAD_FLOOR, s))
+        s *= 1.0 + SPREAD_HOUR_SLOPE * (j / 22.0)
         r_hat.append(centre)
-        spread.append(min(SPREAD_CAP, max(SPREAD_FLOOR, s)))
+        spread.append(s)
     return r_hat, spread
 
 
